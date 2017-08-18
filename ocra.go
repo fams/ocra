@@ -127,8 +127,12 @@ func cryptoFunction(cryptoFunc string) (*ocraCrypto, error) {
 	case "SHA512":
 		result.mode = cHOTPSHA512
 	case "SHA1":
-	default:
 		result.mode = cHOTPSHA1
+	default:
+		return nil, fmt.Errorf(
+			"unknown hashing function required (%d)",
+			components[1],
+		)
 	}
 	// truncation value
 	value, err := strconv.ParseUint(components[2], 10, 32)
@@ -304,7 +308,6 @@ func (o *OCRA) validatePassword(password []byte) ([]byte, error) {
 			)
 		}
 	case cSHA1:
-	default:
 		if len(password) != sha1.Size {
 			return nil, fmt.Errorf(
 				"unexpected password hash len: %d != %d should be a SHA1 hash",
@@ -312,6 +315,11 @@ func (o *OCRA) validatePassword(password []byte) ([]byte, error) {
 				sha1.Size,
 			)
 		}
+	default:
+		return nil, fmt.Errorf(
+			"unknown hashing algorithm (%d)",
+			o.dataIn.hashMode,
+		)
 	}
 	return password, nil
 }
@@ -403,6 +411,8 @@ func (o *OCRA) dataInputConcatenation(
 		}
 	}
 
+	//fmt.Printf("Question:\n(%v) %v.\n", buf, buf.Bytes())
+
 	return buf.Bytes(), nil
 }
 
@@ -491,11 +501,15 @@ func (o *OCRA) OTP(
 	case cHOTPSHA512:
 		hm = hmac.New(sha512.New, key)
 	case cHOTPSHA1:
-	default:
 		hm = hmac.New(sha1.New, key)
 	}
+	if hm == nil {
+		return nil, fmt.Errorf(
+			"unable to intialize HMAC function (key len: %d)",
+			len(key),
+		)
+	}
 	// compute HMAC
-
 	hm.Write(msg)
 	hashed := hm.Sum(nil)
 	if len(hashed) < sha1.Size {
@@ -552,7 +566,7 @@ func (o *OCRA) questionValidation(value interface{}) ([]byte, error) {
 		buf.WriteString(alphanum)
 		return buf.Bytes(), nil
 	case cQuestionNumeric:
-		bigint, ok := value.(big.Int)
+		bigint, ok := value.(*big.Int)
 		if !ok {
 			return nil, fmt.Errorf(
 				"mismatching question value type: having %s expecting big int",
@@ -561,8 +575,7 @@ func (o *OCRA) questionValidation(value interface{}) ([]byte, error) {
 		}
 		// automatically orders in big endian
 		representation := bigint.Bytes()
-		if len(representation) > int(o.dataIn.questionSize) ||
-			len(representation) < 4 {
+		if len(representation) > int(o.dataIn.questionSize) {
 			return nil, fmt.Errorf(
 				"mismatching question value len: having %d expecting >%d and <%d",
 				len(representation),
@@ -570,7 +583,17 @@ func (o *OCRA) questionValidation(value interface{}) ([]byte, error) {
 				o.dataIn.questionSize,
 			)
 		}
-		return representation, nil
+		buf := new(bytes.Buffer)
+		for idx := uint64(0); idx < o.dataIn.questionSize-uint64(len(representation)); idx++ {
+			buf.WriteByte(0x0)
+		}
+		_, err := buf.Write(representation)
+		if err != nil {
+			return nil, fmt.Errorf(
+				"unable to compose numeric binary representation",
+			)
+		}
+		return buf.Bytes(), nil
 	case cQuestionHexadecimal:
 		hexed, ok := value.(string)
 		if !ok {

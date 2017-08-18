@@ -7,8 +7,11 @@
 package ocra
 
 import (
+	"encoding/hex"
+	"math/big"
 	"reflect"
 	"testing"
+	"time"
 )
 
 var suiteTestCases = map[string]*OCRA{
@@ -171,4 +174,221 @@ func TestOTPGeneration(t *testing.T) {
 		t.Fatalf("Unable to generate OTP: %s.", err.Error())
 	}
 	t.Logf("OTP: %s.\n", otp.String())
+}
+
+// OCRA RCF tests
+// PASS1234 is SHA1 hash of "1234"
+const (
+	PASS1234 = "7110eda4d09e062aa5e4a390b0a572ac0d2c0220"
+	SEED     = "3132333435363738393031323334353637383930"
+	SEED32   = "31323334353637383930313233343536373839" +
+		"30313233343536373839303132"
+	SEED64 = "31323334353637383930313233343536373839" +
+		"3031323334353637383930313233343536373839" +
+		"3031323334353637383930313233343536373839" +
+		"3031323334"
+	STOP = 5
+)
+
+var oneWayCR = map[int64]string{
+	00000000: "237653",
+	11111111: "243178",
+	22222222: "653583",
+	33333333: "740991",
+	44444444: "608993",
+	55555555: "388898",
+	66666666: "816933",
+	77777777: "224598",
+	88888888: "750600",
+	99999999: "294470",
+}
+
+func TestRFCCases(t *testing.T) {
+	// plain challenge and response
+	ocra, err := NewOCRA("OCRA-1:HOTP-SHA1-6:QN08")
+	if err != nil {
+		t.Fatalf("Unable to create OCRA instance: %s.", err.Error())
+	}
+	for k, v := range oneWayCR {
+		bint := big.NewInt(k)
+		question, err := ocra.QuestionEncoding(bint, nil)
+		if err != nil {
+			t.Fatalf("Unable to create OCRA question: %s.", err.Error())
+		}
+
+		seed, err := hex.DecodeString(SEED)
+		if err != nil {
+			t.Fatalf("Unable to decode seed: %s.", err.Error())
+		}
+		otp, err := ocra.OTP(seed, 0, 0, question, nil, "")
+		if err != nil {
+			t.Fatalf("Unable to process OTP: %s.", err.Error())
+		}
+		if otp.String() != v {
+			t.Fatalf("Unexpected result: having %s expecting %s.", otp.String(), v)
+		}
+	}
+}
+
+var mutualCRSha256 = map[string]string{
+	"CLI22220SRV11110": "28247970",
+	"CLI22221SRV11111": "01984843",
+	"CLI22222SRV11112": "65387857",
+	"CLI22223SRV11113": "03351211",
+	"CLI22224SRV11114": "83412541",
+	"SRV11110CLI22220": "15510767",
+	"SRV11111CLI22221": "90175646",
+	"SRV11112CLI22222": "33777207",
+	"SRV11113CLI22223": "95285278",
+	"SRV11114CLI22224": "28934924",
+}
+
+func TestRFCMutualSHA256CR(t *testing.T) {
+	// plain challenge and response
+	ocra, err := NewOCRA("OCRA-1:HOTP-SHA256-8:QA08")
+	if err != nil {
+		t.Fatalf("Unable to create OCRA instance: %s.", err.Error())
+	}
+	for k, v := range mutualCRSha256 {
+		question := []byte(k)
+		seed, err := hex.DecodeString(SEED32)
+		if err != nil {
+			t.Fatalf("Unable to decode seed: %s.", err.Error())
+		}
+		otp, err := ocra.OTP(seed, 0, 0, question, nil, "")
+		if err != nil {
+			t.Fatalf("Unable to process OTP: %s.", err.Error())
+		}
+		if otp.String() != v {
+			t.Fatalf("Unexpected result: having %s expecting %s.", otp.String(), v)
+		}
+	}
+}
+
+var mutualCRSha512Server = map[string]string{
+	"CLI22220SRV11110": "79496648",
+	"CLI22221SRV11111": "76831980",
+	"CLI22222SRV11112": "12250499",
+	"CLI22223SRV11113": "90856481",
+	"CLI22224SRV11114": "12761449",
+}
+
+func TestRFCMutualSHA512CRServer(t *testing.T) {
+	// plain challenge and response
+	ocra, err := NewOCRA("OCRA-1:HOTP-SHA512-8:QA08")
+	if err != nil {
+		t.Fatalf("Unable to create OCRA instance: %s.", err.Error())
+	}
+	for k, v := range mutualCRSha512Server {
+		question := []byte(k)
+		seed, err := hex.DecodeString(SEED64)
+		if err != nil {
+			t.Fatalf("Unable to decode seed: %s.", err.Error())
+		}
+		otp, err := ocra.OTP(seed, 0, 0, question, nil, "")
+		if err != nil {
+			t.Fatalf("Unable to process OTP: %s.", err.Error())
+		}
+		if otp.String() != v {
+			t.Fatalf("Unexpected result: having %s expecting %s.", otp.String(), v)
+		}
+	}
+}
+
+var mutualCRSha512Client = map[string]string{
+	"SRV11110CLI22220": "18806276",
+	"SRV11111CLI22221": "70020315",
+	"SRV11112CLI22222": "01600026",
+	"SRV11113CLI22223": "18951020",
+	"SRV11114CLI22224": "32528969",
+}
+
+func TestRFCMutualSHA512CRClient(t *testing.T) {
+	// plain challenge and response
+	ocra, err := NewOCRA("OCRA-1:HOTP-SHA512-8:QA08-PSHA1")
+	if err != nil {
+		t.Fatalf("Unable to create OCRA instance: %s.", err.Error())
+	}
+	for k, v := range mutualCRSha512Client {
+		question := []byte(k)
+		seed, err := hex.DecodeString(SEED64)
+		if err != nil {
+			t.Fatalf("Unable to decode seed: %s.", err.Error())
+		}
+		password, err := hex.DecodeString(PASS1234)
+		if err != nil {
+			t.Fatalf("Unable to decode password: %s.", err.Error())
+		}
+		otp, err := ocra.OTP(seed, 0, 0, question, password, "")
+		if err != nil {
+			t.Fatalf("Unable to process OTP: %s.", err.Error())
+		}
+		if otp.String() != v {
+			t.Fatalf("Unexpected result: having %s expecting %s.", otp.String(), v)
+		}
+	}
+}
+
+var plainSignature = map[string]string{
+	"SIG10000": "53095496",
+	"SIG11000": "04110475",
+	"SIG12000": "31331128",
+	"SIG13000": "76028668",
+	"SIG14000": "46554205",
+}
+
+func TestRFCPlainSignature(t *testing.T) {
+	// plain challenge and response
+	ocra, err := NewOCRA("OCRA-1:HOTP-SHA256-8:QA08")
+	if err != nil {
+		t.Fatalf("Unable to create OCRA instance: %s.", err.Error())
+	}
+	for k, v := range plainSignature {
+		question := []byte(k)
+		seed, err := hex.DecodeString(SEED32)
+		if err != nil {
+			t.Fatalf("Unable to decode seed: %s.", err.Error())
+		}
+		otp, err := ocra.OTP(seed, 0, 0, question, nil, "")
+		if err != nil {
+			t.Fatalf("Unable to process OTP: %s.", err.Error())
+		}
+		if otp.String() != v {
+			t.Fatalf("Unexpected result: having %s expecting %s.", otp.String(), v)
+		}
+	}
+}
+
+var plainSignatureTimeDependant = map[string]string{
+	"SIG1000000": "77537423",
+	"SIG1100000": "31970405",
+	"SIG1200000": "10235557",
+	"SIG1300000": "95213541",
+	"SIG1400000": "65360607",
+}
+
+func TestRFCPlainSignatureWithTime(t *testing.T) {
+	// defined date from RFC
+	date := time.Date(2008, time.March, 25, 12, 06, 30, 0, time.UTC)
+	ts := uint64(date.UnixNano() / int64(time.Minute))
+
+	// plain challenge and response
+	ocra, err := NewOCRA("OCRA-1:HOTP-SHA512-8:QA10-T1M")
+	if err != nil {
+		t.Fatalf("Unable to create OCRA instance: %s.", err.Error())
+	}
+	for k, v := range plainSignatureTimeDependant {
+		question := []byte(k)
+		seed, err := hex.DecodeString(SEED64)
+		if err != nil {
+			t.Fatalf("Unable to decode seed: %s.", err.Error())
+		}
+		otp, err := ocra.OTP(seed, 0, ts, question, nil, "")
+		if err != nil {
+			t.Fatalf("Unable to process OTP: %s.", err.Error())
+		}
+		if otp.String() != v {
+			t.Fatalf("Unexpected result: having %s expecting %s.", otp.String(), v)
+		}
+	}
 }
