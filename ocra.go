@@ -7,14 +7,21 @@
 package ocra
 
 import (
+	"bytes"
 	"crypto/hmac"
+	"crypto/sha1"
+	"crypto/sha256"
+	"crypto/sha512"
+	"encoding/binary"
 	"fmt"
+	"hash"
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
-const powers10 = []int{
+var powers10 = []int32{
 	1,
 	10,
 	100,
@@ -38,7 +45,7 @@ const (
 
 type ocraCrypto struct {
 	mode       ocraMode // hashing supported modes;
-	truncation uint     // 4-10 digits.
+	truncation uint64   // 4-10 digits.
 }
 
 type ocraQuestionFormat int
@@ -68,16 +75,16 @@ const (
 type ocraDataIn struct {
 	// mandatory
 	questionFormat ocraQuestionFormat
-	questionSize   uint
+	questionSize   uint64
 	// optional time stamp
 	timeStamp    bool
-	timeStepSize uint
+	timeStepSize uint64
 	timeStepUnit ocraTimeStampFormat
 	// optional counter
 	counter bool
 	// optional session
 	session     bool
-	sessionSize uint
+	sessionSize uint64
 	// optional password
 	password bool
 	hashMode ocraPasswordHashFunction
@@ -86,13 +93,14 @@ type ocraDataIn struct {
 // OCRA represent the basic tructure used to execute
 // challenge and response ops.
 type OCRA struct {
-	algorithm      uint        // version of the OCRA algorithm;
+	suite          string      // the textual suite representation;
+	algorithm      uint64      // version of the OCRA algorithm;
 	cryptoFunction *ocraCrypto // crypto mode;
 	dataIn         *ocraDataIn // Data input.
 }
 
 const (
-	cOcraSuiteRegex = `^(OCRA-[0-9]):(HOTP-[A-Z0-9]{4,}-[0-9]):((C-)?Q[ANH]{1,1}[0-9]{1,2}(-P[A-Z0-9]{4,6})?(-S[0-9]{3,3})?(-T[0-9]{1,2}[SMH])?)$`
+	cOcraSuiteRegex = `^(OCRA-[0-9]{1,1}):(HOTP-[A-Z0-9]{4,6}-[0-9]{1,2}):((C-)?Q[ANH]{1,1}[0-9]{1,2}(-P[A-Z0-9]{4,6})?(-S[0-9]{3,3})?(-T[0-9]{1,2}[SMH])?)$`
 )
 
 var suiteRegex *regexp.Regexp = nil
@@ -103,7 +111,7 @@ func init() {
 	}
 }
 
-func algorithmVersion(algorithm string) uint {
+func algorithmVersion(algorithm string) uint64 {
 	s := strings.TrimPrefix(algorithm, "OCRA-")
 	value, _ := strconv.ParseUint(s, 10, 32)
 	return value
@@ -157,14 +165,16 @@ func dataInput(dataIn string) *ocraDataIn {
 		sessionSize:    64,
 		hashMode:       cSHA1,
 	}
+	components := strings.Split(dataIn, "-")
 	// [C] | QFxx | [PH | Snnn | TG]
-	for value, idx := range strings.Split(dataIn, "-") {
+	for _, value := range components {
 		switch value[0] {
-		case "C":
+		case 'C':
 			result.counter = true
-		case "Q":
+		case 'Q':
 			s := strings.TrimPrefix(value, "Q")
-			if len(s) != 3 {
+			if len(s) < 2 ||
+				len(s) > 3 {
 				continue
 			}
 			size, err := strconv.ParseUint(s[1:], 10, 32)
@@ -173,22 +183,22 @@ func dataInput(dataIn string) *ocraDataIn {
 			}
 			result.questionSize = size
 			switch s[0] {
-			case "A":
+			case 'A':
 				result.questionFormat = cQuestionAlphanumeric
-			case "N":
+			case 'N':
 				result.questionFormat = cQuestionNumeric
-			case "H":
+			case 'H':
 				result.questionFormat = cQuestionHexadecimal
 			}
-		case "S":
+		case 'S':
 			result.session = true
 			s := strings.TrimPrefix(value, "S")
-			size, err := strconv.ParseUint(s[1:], 10, 32)
+			size, err := strconv.ParseUint(s, 10, 32)
 			if err != nil {
 				continue
 			}
 			result.sessionSize = size
-		case "T":
+		case 'T':
 			result.timeStamp = true
 			s := strings.TrimPrefix(value, "T")
 			lapse, err := strconv.ParseUint(s[:len(s)-1], 10, 32)
@@ -197,12 +207,12 @@ func dataInput(dataIn string) *ocraDataIn {
 			}
 			result.timeStepSize = lapse
 			switch s[len(s)-1] {
-			case "S":
+			case 'S':
 				result.timeStepUnit = cTimeStampSeconds
-			case "H":
+			case 'H':
 				result.timeStepUnit = cTimeStampHours
 			}
-		case "P":
+		case 'P':
 			result.password = true
 			s := strings.TrimPrefix(value, "P")
 			switch s {
@@ -253,10 +263,151 @@ func NewOCRA(suite string) (*OCRA, error) {
 	}
 
 	return &OCRA{
+		suite:          suite,
 		algorithm:      version,
 		cryptoFunction: cryptoFunc,
 		dataIn:         dataInput(components[2]),
 	}, nil
+}
+
+func (o *OCRA) validateAndPadQuestion(question []byte) ([]byte, error) {
+	if len(question) < 4 ||
+		len(question) > 128 {
+		return nil, fmt.Errorf(
+			"invalid question size should be >4 and <128 bytes but found %d",
+			len(question),
+		)
+	}
+	buf := new(bytes.Buffer)
+	size, err := buf.Write(question)
+	if err != nil {
+		return nil, err
+	}
+	for ; size < 128; size++ {
+		buf.WriteByte(0x0)
+	}
+	return buf.Bytes(), nil
+}
+
+func (o *OCRA) validatePassword(password []byte) ([]byte, error) {
+	switch o.dataIn.hashMode {
+	case cSHA256:
+		if len(password) != sha256.Size {
+			return nil, fmt.Errorf(
+				"unexpected password hash len: %d != %d should be a SHA256 hash",
+				len(password),
+				sha256.Size,
+			)
+		}
+	case cSHA512:
+		if len(password) != sha512.Size {
+			return nil, fmt.Errorf(
+				"unexpected password hash len: %d != %d should be a SHA512 hash",
+				len(password),
+				sha512.Size,
+			)
+		}
+	case cSHA1:
+	default:
+		if len(password) != sha1.Size {
+			return nil, fmt.Errorf(
+				"unexpected password hash len: %d != %d should be a SHA1 hash",
+				len(password),
+				sha1.Size,
+			)
+		}
+	}
+	return password, nil
+}
+
+func (o *OCRA) validateSession(session string) ([]byte, error) {
+	if uint64(len(session)) != o.dataIn.sessionSize {
+		return nil, fmt.Errorf(
+			"session string len mismatch: suite require %d but found %d",
+			o.dataIn.sessionSize,
+			len(session),
+		)
+	}
+	buf := new(bytes.Buffer)
+	// the following function call (WriteString)
+	// never rise an error but sometimes panics,
+	// see bytes documentation for details:
+	// https://golang.org/pkg/bytes/
+	buf.WriteString(session)
+	// validate UTF8 nature
+	resultingData := buf.Bytes()
+	if utf8.Valid(resultingData) != true {
+		return nil, fmt.Errorf(
+			"produced byte slice contains non UTF8 values",
+		)
+	}
+	return resultingData, nil
+}
+
+func (o *OCRA) dataInputConcatenation(
+	counter, timeStamp uint64,
+	question, password []byte,
+	session string,
+) ([]byte, error) {
+	// DataInput = {OCRASuite | 00 | C | Q | P | S | T}
+	buf := new(bytes.Buffer)
+
+	// the following function calls (WriteString,WriteByte)
+	// never rise an error but sometimes panics,
+	// see bytes documentation for details:
+	// https://golang.org/pkg/bytes/
+
+	// add OCRASuite string
+	buf.WriteString(o.suite)
+	// add 0x0 byte separator
+	buf.WriteByte(0x0)
+	// add (optionally) counter
+	if o.dataIn.counter {
+		err := binary.Write(buf, binary.BigEndian, counter)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// manage questions
+	validatedQuestion, err := o.validateAndPadQuestion(question)
+	if err != nil {
+		return nil, err
+	}
+	_, err = buf.Write(validatedQuestion)
+	if err != nil {
+		return nil, err
+	}
+	// add (optionally) password
+	if o.dataIn.password {
+		validatedPwd, err := o.validatePassword(password)
+		if err != nil {
+			return nil, err
+		}
+		_, err = buf.Write(validatedPwd)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// add (optionally) session
+	if o.dataIn.session {
+		validatedSession, err := o.validateSession(session)
+		if err != nil {
+			return nil, err
+		}
+		_, err = buf.Write(validatedSession)
+		if err != nil {
+			return nil, err
+		}
+	}
+	// add time stamp
+	if o.dataIn.timeStamp {
+		err := binary.Write(buf, binary.BigEndian, timeStamp)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	return buf.Bytes(), nil
 }
 
 // generateOTP implements RFC6287 to produce an OTP starting from a
@@ -312,11 +463,57 @@ func NewOCRA(suite string) (*OCRA, error) {
 // new computation is requested by the user.  The server's counter value
 // MUST only be incremented after a successful OCRA authentication.
 func (o *OCRA) OTP(
-	counter uint64,
-	challenge [128]byte,
-	password []byte,
+	key []byte,
+	counter, timeStamp uint64,
+	question, password []byte,
 	session string,
-	timeStamp uint64,
 ) (string, error) {
-	return "", nil
+	if key == nil ||
+		len(key) == 0 {
+		return "", fmt.Errorf(
+			"invalid key value must be not nil and of len > 0",
+		)
+	}
+	// prepare message
+	msg, err := o.dataInputConcatenation(
+		counter, timeStamp,
+		question, password,
+		session,
+	)
+	if err != nil {
+		return "", err
+	}
+	// select hashing function
+	var hm hash.Hash = nil
+	switch o.cryptoFunction.mode {
+	case cHOTPSHA256:
+		hm = hmac.New(sha256.New, key)
+	case cHOTPSHA512:
+		hm = hmac.New(sha512.New, key)
+	case cHOTPSHA1:
+	default:
+		hm = hmac.New(sha1.New, key)
+	}
+	// compute HMAC
+
+	hm.Write(msg)
+	hashed := hm.Sum(nil)
+	if len(hashed) < sha1.Size {
+		return "", fmt.Errorf(
+			"unexpected hashed data len must not > %d",
+			sha1.Size,
+		)
+	}
+
+	// extract selected bytes to get 32 bit integer value
+	offset := int32(hashed[len(hashed)-1] & 0x0f)
+	numeric := int32(((hashed[offset] & 0x7f) << 24) |
+		((hashed[offset+1] & 0xff) << 16) |
+		((hashed[offset+2] & 0xff) << 8) |
+		(hashed[offset+3] & 0xff))
+	// truncation value is validated when creating OCRA
+	// struct
+	decimal := int32(numeric % powers10[o.cryptoFunction.truncation])
+
+	return fmt.Sprintf("%d", decimal), nil
 }
