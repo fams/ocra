@@ -13,11 +13,15 @@ import (
 	"crypto/sha256"
 	"crypto/sha512"
 	"encoding/binary"
+	"encoding/hex"
 	"fmt"
 	"hash"
+	"math/big"
+	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"unicode/utf8"
 )
 
@@ -97,6 +101,8 @@ type OCRA struct {
 	algorithm      uint64      // version of the OCRA algorithm;
 	cryptoFunction *ocraCrypto // crypto mode;
 	dataIn         *ocraDataIn // Data input.
+	// concurrency managemnt
+	mtx sync.RWMutex // provides concurrency safety for multiple routines access.
 }
 
 const (
@@ -181,7 +187,10 @@ func dataInput(dataIn string) *ocraDataIn {
 			if err != nil {
 				continue
 			}
-			result.questionSize = size
+			if size >= 4 &&
+				size <= 64 {
+				result.questionSize = size
+			}
 			switch s[0] {
 			case 'A':
 				result.questionFormat = cQuestionAlphanumeric
@@ -467,13 +476,17 @@ func (o *OCRA) OTP(
 	counter, timeStamp uint64,
 	question, password []byte,
 	session string,
-) (string, error) {
+) (int32, error) {
 	if key == nil ||
 		len(key) == 0 {
-		return "", fmt.Errorf(
+		return 0, fmt.Errorf(
 			"invalid key value must be not nil and of len > 0",
 		)
 	}
+	// lock OCRA instance
+	o.mtx.RLock()
+	defer o.mtx.RUnlock()
+
 	// prepare message
 	msg, err := o.dataInputConcatenation(
 		counter, timeStamp,
@@ -481,7 +494,7 @@ func (o *OCRA) OTP(
 		session,
 	)
 	if err != nil {
-		return "", err
+		return 0, err
 	}
 	// select hashing function
 	var hm hash.Hash = nil
@@ -499,7 +512,7 @@ func (o *OCRA) OTP(
 	hm.Write(msg)
 	hashed := hm.Sum(nil)
 	if len(hashed) < sha1.Size {
-		return "", fmt.Errorf(
+		return 0, fmt.Errorf(
 			"unexpected hashed data len must not > %d",
 			sha1.Size,
 		)
@@ -511,9 +524,147 @@ func (o *OCRA) OTP(
 		((hashed[offset+1] & 0xff) << 16) |
 		((hashed[offset+2] & 0xff) << 8) |
 		(hashed[offset+3] & 0xff))
+
+	fmt.Printf("%v -> %v -> %v\n",
+		hashed[offset],
+		(hashed[offset])&0x7f,
+		(hashed[offset]&0x7f)<<24,
+	)
+
 	// truncation value is validated when creating OCRA
 	// struct
 	decimal := int32(numeric % powers10[o.cryptoFunction.truncation])
+	fmt.Printf("%v\n%d %d %d %d\n", hashed, offset, hashed[offset], numeric, decimal)
 
-	return fmt.Sprintf("%d", decimal), nil
+	return decimal, nil
+}
+
+func (o *OCRA) questionValidation(value interface{}) ([]byte, error) {
+	switch o.dataIn.questionFormat {
+	case cQuestionAlphanumeric:
+		alphanum, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf(
+				"mismatching question value type: having %s expecting string",
+				reflect.TypeOf(value),
+			)
+		}
+		if len(alphanum) != int(o.dataIn.questionSize) {
+			return nil, fmt.Errorf(
+				"mismatching question value len: having %d expecting %d",
+				len(alphanum),
+				o.dataIn.questionSize,
+			)
+		}
+		buf := new(bytes.Buffer)
+		// the following function call (WriteString)
+		// never rise an error but sometimes panics,
+		// see bytes documentation for details:
+		// https://golang.org/pkg/bytes/
+		buf.WriteString(alphanum)
+		return buf.Bytes(), nil
+	case cQuestionNumeric:
+		bigint, ok := value.(big.Int)
+		if !ok {
+			return nil, fmt.Errorf(
+				"mismatching question value type: having %s expecting big int",
+				reflect.TypeOf(value),
+			)
+		}
+		// automatically orders in big endian
+		representation := bigint.Bytes()
+		if len(representation) > int(o.dataIn.questionSize) ||
+			len(representation) < 4 {
+			return nil, fmt.Errorf(
+				"mismatching question value len: having %d expecting >%d and <%d",
+				len(representation),
+				4,
+				o.dataIn.questionSize,
+			)
+		}
+		return representation, nil
+	case cQuestionHexadecimal:
+		hexed, ok := value.(string)
+		if !ok {
+			return nil, fmt.Errorf(
+				"mismatching question value type: having %s expecting string",
+				reflect.TypeOf(value),
+			)
+		}
+		decoded, err := hex.DecodeString(hexed)
+		if err != nil {
+			return nil, err
+		}
+		if len(decoded) != int(o.dataIn.questionSize) {
+			return nil, fmt.Errorf(
+				"mismatching question value len: having %d expecting %d",
+				len(decoded),
+				o.dataIn.questionSize,
+			)
+		}
+		return decoded, nil
+	default:
+		return nil, fmt.Errorf(
+			"unknown question format",
+		)
+	}
+}
+
+func (o *OCRA) QuestionEncoding(
+	value interface{},
+	otherPartyGenerated interface{},
+) ([]byte, error) {
+	// lock OCRA instance
+	o.mtx.RLock()
+	defer o.mtx.RUnlock()
+
+	buf := new(bytes.Buffer)
+	if otherPartyGenerated != nil {
+		otherValidated, err := o.questionValidation(otherPartyGenerated)
+		if err != nil {
+			return nil, err
+		}
+		_, err = buf.Write(otherValidated)
+		if err != nil {
+			return nil, err
+		}
+	}
+	validated, err := o.questionValidation(value)
+	if err != nil {
+		return nil, err
+	}
+	_, err = buf.Write(validated)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func (o *OCRA) PasswordEncoding(password []byte) ([]byte, error) {
+	if password == nil ||
+		len(password) == 0 {
+		return nil, fmt.Errorf(
+			"invalid password should be not nil nor of len zero",
+		)
+	}
+	// lock OCRA instance
+	o.mtx.RLock()
+	defer o.mtx.RUnlock()
+
+	// hash password
+	switch o.dataIn.hashMode {
+	case cSHA1:
+		hashed := sha1.Sum(password)
+		return hashed[:], nil
+	case cSHA256:
+		hashed := sha256.Sum256(password)
+		return hashed[:], nil
+	case cSHA512:
+		hashed := sha512.Sum512(password)
+		return hashed[:], nil
+	default:
+		return nil, fmt.Errorf(
+			"unknown password hash mode",
+		)
+	}
 }
