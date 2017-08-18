@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"hash"
+	"math"
 	"math/big"
 	"reflect"
 	"regexp"
@@ -24,20 +25,6 @@ import (
 	"sync"
 	"unicode/utf8"
 )
-
-var powers10 = []int32{
-	1,
-	10,
-	100,
-	1000,
-	10000,
-	100000,
-	1000000,
-	10000000,
-	100000000,
-	1000000000,
-	1000000000,
-}
 
 type ocraMode int
 
@@ -476,10 +463,10 @@ func (o *OCRA) OTP(
 	counter, timeStamp uint64,
 	question, password []byte,
 	session string,
-) (int32, error) {
+) (*OTP, error) {
 	if key == nil ||
 		len(key) == 0 {
-		return 0, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"invalid key value must be not nil and of len > 0",
 		)
 	}
@@ -494,7 +481,7 @@ func (o *OCRA) OTP(
 		session,
 	)
 	if err != nil {
-		return 0, err
+		return nil, err
 	}
 	// select hashing function
 	var hm hash.Hash = nil
@@ -512,31 +499,32 @@ func (o *OCRA) OTP(
 	hm.Write(msg)
 	hashed := hm.Sum(nil)
 	if len(hashed) < sha1.Size {
-		return 0, fmt.Errorf(
+		return nil, fmt.Errorf(
 			"unexpected hashed data len must not > %d",
 			sha1.Size,
 		)
 	}
 
 	// extract selected bytes to get 32 bit integer value
-	offset := int32(hashed[len(hashed)-1] & 0x0f)
-	numeric := int32(((hashed[offset] & 0x7f) << 24) |
-		((hashed[offset+1] & 0xff) << 16) |
-		((hashed[offset+2] & 0xff) << 8) |
-		(hashed[offset+3] & 0xff))
+	otp := o.dynamicTruncation(hashed)
 
-	fmt.Printf("%v -> %v -> %v\n",
-		hashed[offset],
-		(hashed[offset])&0x7f,
-		(hashed[offset]&0x7f)<<24,
-	)
+	return &OTP{
+		Value: otp,
+		size:  o.cryptoFunction.truncation,
+	}, nil
+}
 
-	// truncation value is validated when creating OCRA
-	// struct
-	decimal := int32(numeric % powers10[o.cryptoFunction.truncation])
-	fmt.Printf("%v\n%d %d %d %d\n", hashed, offset, hashed[offset], numeric, decimal)
+func (o *OCRA) dynamicTruncation(sum []byte) int32 {
+	// "Dynamic truncation" in RFC 4226
+	// http://tools.ietf.org/html/rfc4226#section-5.4
+	offset := sum[len(sum)-1] & 0xf
+	value := int64(((int(sum[offset]) & 0x7f) << 24) |
+		((int(sum[offset+1] & 0xff)) << 16) |
+		((int(sum[offset+2] & 0xff)) << 8) |
+		(int(sum[offset+3]) & 0xff))
 
-	return decimal, nil
+	mod := int32(value % int64(math.Pow10(int(o.cryptoFunction.truncation))))
+	return mod
 }
 
 func (o *OCRA) questionValidation(value interface{}) ([]byte, error) {

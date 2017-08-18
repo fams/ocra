@@ -147,7 +147,7 @@ func TestNewOcraWithMalformedSuite(t *testing.T) {
 }
 
 func TestOTPGeneration(t *testing.T) {
-	ocra, err := NewOCRA("OCRA-1:HOTP-SHA256-10:C-QA64-PSHA1-S016")
+	ocra, err := NewOCRA("OCRA-1:HOTP-SHA512-10:C-QA64-PSHA1-S016")
 	if err != nil {
 		t.Fatalf("Unable to create OCRA instance: %s.", err.Error())
 	}
@@ -163,12 +163,12 @@ func TestOTPGeneration(t *testing.T) {
 	}
 	otp, err := ocra.OTP(
 		[]byte("1234567890"),
-		74, 0,
+		371, 0,
 		question, pwd,
 		"123456789ABCDFEG",
 	)
 	if err != nil {
 		t.Fatalf("Unable to generate OTP: %s.", err.Error())
 	}
-	t.Logf("OTP: %d.\n", otp)
+	t.Logf("OTP: %s.\n", otp.String())
 }
