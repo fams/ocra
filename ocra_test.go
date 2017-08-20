@@ -495,12 +495,15 @@ var plainSignatureTimeDependant = map[string]string{
 func TestRFCPlainSignatureWithTime(t *testing.T) {
 	// defined date from RFC
 	date := time.Date(2008, time.March, 25, 12, 06, 30, 0, time.UTC)
-	ts := uint64(date.UnixNano() / int64(time.Minute))
 
 	// plain challenge and response
 	ocra, err := NewOCRA("OCRA-1:HOTP-SHA512-8:QA10-T1M")
 	if err != nil {
 		t.Fatalf("Unable to create OCRA instance: %s.", err.Error())
+	}
+	ts, err := ocra.TimeStampEncoding(&date)
+	if err != nil {
+		t.Fatalf("Unable to encode time stamp: %s.", err.Error())
 	}
 	for k, v := range plainSignatureTimeDependant {
 		question := []byte(k)
