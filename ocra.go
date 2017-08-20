@@ -27,6 +27,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 	"unicode/utf8"
 )
 
@@ -638,4 +639,30 @@ func (o *OCRA) PasswordEncoding(password []byte) ([]byte, error) {
 			"unknown password hash mode",
 		)
 	}
+}
+
+// TimeStampEncoding encode a golang time structure in a uint64
+// epoch aligned with OCRA suite description.
+func (o *OCRA) TimeStampEncoding(ts *time.Time) (uint64, error) {
+	if ts == nil {
+		return 0, fmt.Errorf(
+			"unable to process a nil time stamp",
+		)
+	}
+	var step uint64
+	switch o.dataIn.timeStepUnit {
+	case cTimeStampHours:
+		step = uint64(ts.UnixNano()/int64(time.Hour)) / o.dataIn.timeStepSize
+	case cTimeStampMinutes:
+		step = uint64(ts.UnixNano()/int64(time.Minute)) / o.dataIn.timeStepSize
+	case cTimeStampSeconds:
+		step = uint64(ts.UnixNano()/int64(time.Second)) / o.dataIn.timeStepSize
+	default:
+		return 0, fmt.Errorf(
+			"unknown time step unit: %d",
+			o.dataIn.timeStepUnit,
+		)
+	}
+
+	return step, nil
 }
